@@ -432,13 +432,21 @@ extern "C" __global__ void flash_tq4_decode(
     for (int stride = TQ4_NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // Race fix (see flash_turboquant.cuh's reduction): reads
+            // hoisted before any write, __syncwarp() fence, lane-0 m/l
+            // stores — a slow lane re-reading smem after a fast lane's
+            // write merges `other`'s contribution twice.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float mn = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - mn), scale_w = __expf(mw - mn);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = mn;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = mn;
+                }
                 #pragma unroll
                 for (int i = 0; i < TQ4_VEC; i++)
                     smem_o[warp_id][bf16_vec_off + i] =
@@ -644,13 +652,21 @@ extern "C" __global__ void flash_tq4_decode_splitk(
     for (int stride = TQ4_NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // Race fix (see flash_turboquant.cuh's reduction): reads
+            // hoisted before any write, __syncwarp() fence, lane-0 m/l
+            // stores — a slow lane re-reading smem after a fast lane's
+            // write merges `other`'s contribution twice.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float mn = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - mn), scale_w = __expf(mw - mn);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = mn;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = mn;
+                }
                 #pragma unroll
                 for (int i = 0; i < TQ4_VEC; i++)
                     smem_o[warp_id][bf16_vec_off + i] =
@@ -1069,13 +1085,21 @@ extern "C" __global__ void flash_tq3_decode(
     for (int stride = TQ4_NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // Race fix (see flash_turboquant.cuh's reduction): reads
+            // hoisted before any write, __syncwarp() fence, lane-0 m/l
+            // stores — a slow lane re-reading smem after a fast lane's
+            // write merges `other`'s contribution twice.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float mn = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - mn), scale_w = __expf(mw - mn);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = mn;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = mn;
+                }
                 #pragma unroll
                 for (int i = 0; i < TQ4_VEC; i++)
                     smem_o[warp_id][bf16_vec_off + i] =
@@ -1285,13 +1309,21 @@ extern "C" __global__ void flash_tq3_decode_splitk(
     for (int stride = TQ4_NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // Race fix (see flash_turboquant.cuh's reduction): reads
+            // hoisted before any write, __syncwarp() fence, lane-0 m/l
+            // stores — a slow lane re-reading smem after a fast lane's
+            // write merges `other`'s contribution twice.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float mn = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - mn), scale_w = __expf(mw - mn);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = mn;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = mn;
+                }
                 #pragma unroll
                 for (int i = 0; i < TQ4_VEC; i++)
                     smem_o[warp_id][bf16_vec_off + i] =

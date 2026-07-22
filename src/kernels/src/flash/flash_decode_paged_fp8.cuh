@@ -291,13 +291,23 @@ extern "C" __global__ void flash_decode_paged_fp8(
     for (int stride = NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // Race fix (see flash_turboquant.cuh's reduction): all lanes
+            // must finish reading smem_m/smem_l[warp_id] before any lane
+            // writes them — under independent thread scheduling a slow
+            // lane re-reading after a fast lane's write merges `other`'s
+            // contribution twice. Reads hoisted, __syncwarp() fence,
+            // warp-uniform m/l stores restricted to lane 0.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float m_new = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - m_new), scale_w = __expf(mw - m_new);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = m_new;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = m_new;
+                }
                 #pragma unroll
                 for (int i = 0; i < VEC_BF16; i++)
                     smem_o[warp_id][bf16_vec_off + i] =
@@ -518,13 +528,23 @@ extern "C" __global__ void flash_decode_paged_splitk_fp8(
     for (int stride = NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // Race fix (see flash_turboquant.cuh's reduction): all lanes
+            // must finish reading smem_m/smem_l[warp_id] before any lane
+            // writes them — under independent thread scheduling a slow
+            // lane re-reading after a fast lane's write merges `other`'s
+            // contribution twice. Reads hoisted, __syncwarp() fence,
+            // warp-uniform m/l stores restricted to lane 0.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float m_new = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - m_new), scale_w = __expf(mw - m_new);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = m_new;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = m_new;
+                }
                 #pragma unroll
                 for (int i = 0; i < VEC_BF16; i++)
                     smem_o[warp_id][bf16_vec_off + i] =
