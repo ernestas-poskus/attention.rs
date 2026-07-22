@@ -534,13 +534,26 @@ extern "C" __global__ void flash_tq_decode_k8v4(
     for (int stride = TQ_NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // All lanes must finish reading smem_m/smem_l[warp_id] before
+            // any lane writes them: under independent thread scheduling
+            // (Volta+), a slow lane re-reading after a fast lane's write
+            // below sees the already-merged value, so scale_me collapses
+            // to 1 and `other`'s l/O contribution is merged twice — the
+            // compounding graphed-decode drift racecheck reports as 6
+            // read/write hazard pairs in this loop. Reads are hoisted to
+            // registers, fenced with __syncwarp(), and the (warp-uniform)
+            // m/l stores are restricted to lane 0.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float m_new = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - m_new), scale_w = __expf(mw - m_new);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = m_new;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = m_new;
+                }
                 #pragma unroll
                 for (int i = 0; i < TQ_VEC; i++)
                     smem_o[warp_id][bf16_vec_off + i] =
@@ -832,13 +845,26 @@ extern "C" __global__ void flash_tq_decode_k8v4_splitk(
     for (int stride = TQ_NUM_WARPS/2; stride > 0; stride >>= 1) {
         if (warp_id < (unsigned int)stride) {
             unsigned int other = warp_id + stride;
+            // All lanes must finish reading smem_m/smem_l[warp_id] before
+            // any lane writes them: under independent thread scheduling
+            // (Volta+), a slow lane re-reading after a fast lane's write
+            // below sees the already-merged value, so scale_me collapses
+            // to 1 and `other`'s l/O contribution is merged twice — the
+            // compounding graphed-decode drift racecheck reports as 6
+            // read/write hazard pairs in this loop. Reads are hoisted to
+            // registers, fenced with __syncwarp(), and the (warp-uniform)
+            // m/l stores are restricted to lane 0.
             float lw = smem_l[other];
+            float mw = smem_m[other];
+            float my_m = smem_m[warp_id], my_l = smem_l[warp_id];
+            __syncwarp();
             if (lw > 0.f) {
-                float mw = smem_m[other], my_m = smem_m[warp_id], my_l = smem_l[warp_id];
                 float m_new = fmaxf(my_m, mw);
                 float scale_me = __expf(my_m - m_new), scale_w = __expf(mw - m_new);
-                smem_l[warp_id] = my_l * scale_me + lw * scale_w;
-                smem_m[warp_id] = m_new;
+                if (lane_id == 0) {
+                    smem_l[warp_id] = my_l * scale_me + lw * scale_w;
+                    smem_m[warp_id] = m_new;
+                }
                 #pragma unroll
                 for (int i = 0; i < TQ_VEC; i++)
                     smem_o[warp_id][bf16_vec_off + i] =
