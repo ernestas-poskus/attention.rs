@@ -561,6 +561,21 @@ impl PagedAttention {
                 value_seq
             };
 
+            // Callers built with a fused attention backend pass no mask (the
+            // backend owns masking), but this fallback still needs one.
+            let own_mask = if attention_mask.is_none() {
+                let mask =
+                    Tensor::zeros((seq_len, seq_len), query_seq.dtype(), query_seq.device())?;
+                crate::mask::causal_mask(&mask, self.sliding_window)?;
+                Some(mask.unsqueeze(0)?.unsqueeze(0)?)
+            } else {
+                None
+            };
+            let seq_mask = match &attention_mask {
+                Some(mask) => Some(&mask[i]),
+                None => own_mask.as_ref(),
+            };
+
             let num_chunks = (seq_len + chunk_size - 1) / chunk_size;
 
             for c in 0..num_chunks {
@@ -574,8 +589,8 @@ impl PagedAttention {
                     att = ((att / sc)?.tanh()? * sc)?;
                 }
 
-                if let Some(mask) = &attention_mask {
-                    let q_chunk_mask = mask[i].narrow(2, offset, len)?;
+                if let Some(mask) = seq_mask {
+                    let q_chunk_mask = mask.narrow(2, offset, len)?;
                     att = att.broadcast_add(&q_chunk_mask)?;
                 }
 
