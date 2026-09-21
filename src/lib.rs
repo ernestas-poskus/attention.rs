@@ -135,8 +135,24 @@ pub struct TurboquantLayerCache {
     pub v_quant: Tensor,
 }
 
-static TURBOQUANT_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<TurboquantGlobalCache>>> =
-    std::sync::OnceLock::new();
+// Keyed by CUDA device ordinal: the cache holds DEVICE tensors (absmax +
+// quantized KV), and multi-GPU data parallelism initializes one engine per
+// device. A single process-global slot meant the second engine's init
+// OVERWROTE the first's — every kernel on device 0 then dereferenced
+// device-1 pointers: sticky CUDA_ERROR_ILLEGAL_ADDRESS on both (observed
+// on a 2×RTX 3090 data-parallel setup).
+static TURBOQUANT_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<usize, TurboquantGlobalCache>>,
+> = std::sync::OnceLock::new();
+
+/// CUDA device ordinal of a tensor (0 for non-CUDA) — the turboquant
+/// cache key.
+pub fn tensor_device_ordinal(t: &Tensor) -> usize {
+    match t.device().location() {
+        candle_core::DeviceLocation::Cuda { gpu_id } => gpu_id,
+        _ => 0,
+    }
+}
 
 pub struct TurboquantGlobalCache {
     pub mode: TurboquantMode,
@@ -145,17 +161,22 @@ pub struct TurboquantGlobalCache {
 }
 
 pub fn init_turboquant_cache(
+    device_ordinal: usize,
     mode: TurboquantMode,
     layers: Vec<TurboquantLayerCache>,
     block_size: usize,
 ) {
-    let cache = TURBOQUANT_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let cache =
+        TURBOQUANT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut guard = cache.lock().unwrap();
-    *guard = Some(TurboquantGlobalCache {
-        mode,
-        layers,
-        block_size,
-    });
+    let _ = guard.insert(
+        device_ordinal,
+        TurboquantGlobalCache {
+            mode,
+            layers,
+            block_size,
+        },
+    );
 }
 
 pub fn has_flashinfer_fp8_e4m3() -> bool {
@@ -169,22 +190,22 @@ pub fn has_flashinfer_fp8_e4m3() -> bool {
     }
 }
 
-pub fn get_turboquant_mode() -> Option<TurboquantMode> {
+pub fn get_turboquant_mode(device_ordinal: usize) -> Option<TurboquantMode> {
     TURBOQUANT_CACHE
         .get()
         .and_then(|m| m.lock().ok())
-        .and_then(|g| g.as_ref().map(|c| c.mode))
+        .and_then(|g| g.get(&device_ordinal).map(|c| c.mode))
 }
 
-pub fn get_turboquant_block_size() -> usize {
+pub fn get_turboquant_block_size(device_ordinal: usize) -> usize {
     TURBOQUANT_CACHE
         .get()
         .and_then(|m| m.lock().ok())
-        .and_then(|g| g.as_ref().map(|c| c.block_size))
+        .and_then(|g| g.get(&device_ordinal).map(|c| c.block_size))
         .unwrap_or(16)
 }
 
-pub fn with_turboquant_layer<F, R>(layer_idx: usize, f: F) -> Option<R>
+pub fn with_turboquant_layer<F, R>(device_ordinal: usize, layer_idx: usize, f: F) -> Option<R>
 where
     F: FnOnce(&TurboquantLayerCache, TurboquantMode) -> R,
 {
@@ -192,7 +213,7 @@ where
         .get()
         .and_then(|m| m.lock().ok())
         .and_then(|g| {
-            g.as_ref()
+            g.get(&device_ordinal)
                 .and_then(|c| c.layers.get(layer_idx).map(|l| f(l, c.mode)))
         })
 }
@@ -789,6 +810,7 @@ impl PagedAttention {
         input_metadata: &InputMetadata,
         softcapping: Option<f64>,
     ) -> Result<Tensor> {
+        let tq_device = tensor_device_ordinal(query);
         // head_dim > 256: FlashAttn/FlashInfer don't support it.
         // TurboQuant: only native flash path supports turbo KV cache.
         // Both cases force use of native flash path below.
@@ -801,7 +823,7 @@ impl PagedAttention {
 
         #[cfg(feature = "flashattn")]
         let skip_flashattn = {
-            let tq = get_turboquant_mode().is_some();
+            let tq = get_turboquant_mode(tq_device).is_some();
             let fp8_on_non_sm90 = if self.k_scale.is_some() {
                 #[cfg(feature = "cuda")]
                 {
@@ -954,8 +976,8 @@ impl PagedAttention {
 
             let slot_mapping = input_metadata.slot_mapping.flatten_all()?;
 
-            let tq_mode = get_turboquant_mode();
-            let tq_bs = get_turboquant_block_size();
+            let tq_mode = get_turboquant_mode(tq_device);
+            let tq_bs = get_turboquant_block_size(tq_device);
 
             let tq_uses_std_cache = matches!(tq_mode, None | Some(TurboquantMode::Turbo8));
             // Native flash FP8 path: skip dynamic AMAX scale updates, keep K/V scales at 1.0.
@@ -982,7 +1004,7 @@ impl PagedAttention {
                             self.v_scale.as_ref(),
                             &slot_mapping,
                         )?;
-                        if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                        if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                             crate::flash::flash_tq_store_k8v4(
                                 &key_p,
                                 &value_p,
@@ -998,7 +1020,7 @@ impl PagedAttention {
                     }
                     Some(TurboquantMode::Turbo4) => {
                         // Turbo4: both K and V stored ONLY in TQ buffers (no standard cache)
-                        if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                        if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                             crate::flash::flash_tq4_store(
                                 &key_p,
                                 &value_p,
@@ -1017,7 +1039,7 @@ impl PagedAttention {
                     }
                     Some(TurboquantMode::Turbo3) => {
                         // Turbo3: both K and V stored ONLY in TQ buffers (no standard cache)
-                        if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                        if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                             crate::flash::flash_tq3_store(
                                 &key_p,
                                 &value_p,
@@ -1065,7 +1087,7 @@ impl PagedAttention {
             if input_metadata.is_prefill {
                 match tq_mode {
                     Some(TurboquantMode::Turbo4) => {
-                        let r = with_turboquant_layer(self.layer_idx, |tq, _| {
+                        let r = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                             crate::flash::flash_tq4_prefill(
                                 &query_p,
                                 tq.k_absmax.as_ref().unwrap(),
@@ -1090,7 +1112,7 @@ impl PagedAttention {
                         }
                     }
                     Some(TurboquantMode::Turbo3) => {
-                        let r = with_turboquant_layer(self.layer_idx, |tq, _| {
+                        let r = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                             crate::flash::flash_tq3_prefill(
                                 &query_p,
                                 tq.k_absmax.as_ref().unwrap(),
@@ -1164,7 +1186,7 @@ impl PagedAttention {
                         )
                         .unwrap()
                     });
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::flash::flash_tq_decode_k8v4_splitk(
                             &query_p,
                             key_cache.as_ref().unwrap(),
@@ -1199,7 +1221,7 @@ impl PagedAttention {
                         )
                         .unwrap()
                     });
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::flash::flash_tq4_decode(
                             &query_p,
                             tq.k_absmax.as_ref().unwrap(),
@@ -1234,7 +1256,7 @@ impl PagedAttention {
                         )
                         .unwrap()
                     });
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::flash::flash_tq3_decode(
                             &query_p,
                             tq.k_absmax.as_ref().unwrap(),
@@ -1304,7 +1326,7 @@ impl PagedAttention {
             } else {
                 slot_mapping.to_dtype(DType::I64)?.contiguous()?
             };
-            let tq_mode_metal = get_turboquant_mode();
+            let tq_mode_metal = get_turboquant_mode(tq_device);
             let fp8_cache_metal = self.k_scale.is_some() && self.v_scale.is_some();
 
             if let (Some(key_cache), Some(value_cache)) = (key_cache.as_ref(), value_cache.as_ref())
@@ -1335,7 +1357,7 @@ impl PagedAttention {
                 if matches!(tq_mode_metal, Some(TurboquantMode::Turbo8)) {
                     let dtype = metal_flash_supported_quantized_source_dtype(value_p.dtype())?;
                     let value_metal = metal_flash_cast_contiguous(&value_p, dtype)?;
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::metal_flash::flash_tq_store_k8v4_metal(
                             &value_metal,
                             &tq.v_absmax,
@@ -1351,7 +1373,7 @@ impl PagedAttention {
                     let dtype = metal_flash_supported_quantized_source_dtype(key_p.dtype())?;
                     let key_metal = metal_flash_cast_contiguous(&key_p, dtype)?;
                     let value_metal = metal_flash_cast_contiguous(&value_p, dtype)?;
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::metal_flash::flash_tq4_store_metal(
                             &key_metal,
                             &value_metal,
@@ -1371,7 +1393,7 @@ impl PagedAttention {
                     let dtype = metal_flash_supported_quantized_source_dtype(key_p.dtype())?;
                     let key_metal = metal_flash_cast_contiguous(&key_p, dtype)?;
                     let value_metal = metal_flash_cast_contiguous(&value_p, dtype)?;
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::metal_flash::flash_tq3_store_metal(
                             &key_metal,
                             &value_metal,
@@ -1412,7 +1434,7 @@ impl PagedAttention {
                 if matches!(tq_mode_metal, Some(TurboquantMode::Turbo4)) {
                     let dtype = metal_flash_supported_quantized_source_dtype(query_p.dtype())?;
                     let query_metal = metal_flash_cast_contiguous(&query_p, dtype)?;
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::metal_flash::flash_tq4_prefill_metal(
                             &query_metal,
                             tq.k_absmax.as_ref().unwrap(),
@@ -1439,7 +1461,7 @@ impl PagedAttention {
                 if matches!(tq_mode_metal, Some(TurboquantMode::Turbo3)) {
                     let dtype = metal_flash_supported_quantized_source_dtype(query_p.dtype())?;
                     let query_metal = metal_flash_cast_contiguous(&query_p, dtype)?;
-                    if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                    if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                         crate::metal_flash::flash_tq3_prefill_metal(
                             &query_metal,
                             tq.k_absmax.as_ref().unwrap(),
@@ -1493,7 +1515,7 @@ impl PagedAttention {
                 let dtype = metal_flash_supported_quantized_source_dtype(query_p.dtype())?;
                 let query_metal = metal_flash_cast_contiguous(&query_p, dtype)?;
                 let output = query_metal.zeros_like()?;
-                if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                     crate::metal_flash::flash_tq_decode_k8v4_metal(
                         &query_metal,
                         key_cache,
@@ -1521,7 +1543,7 @@ impl PagedAttention {
                 let dtype = metal_flash_supported_quantized_source_dtype(query_p.dtype())?;
                 let query_metal = metal_flash_cast_contiguous(&query_p, dtype)?;
                 let output = query_metal.zeros_like()?;
-                if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                     crate::metal_flash::flash_tq4_decode_metal(
                         &query_metal,
                         tq.k_absmax.as_ref().unwrap(),
@@ -1548,7 +1570,7 @@ impl PagedAttention {
                 let dtype = metal_flash_supported_quantized_source_dtype(query_p.dtype())?;
                 let query_metal = metal_flash_cast_contiguous(&query_p, dtype)?;
                 let output = query_metal.zeros_like()?;
-                if let Some(r) = with_turboquant_layer(self.layer_idx, |tq, _| {
+                if let Some(r) = with_turboquant_layer(tq_device, self.layer_idx, |tq, _| {
                     crate::metal_flash::flash_tq3_decode_metal(
                         &query_metal,
                         tq.k_absmax.as_ref().unwrap(),
