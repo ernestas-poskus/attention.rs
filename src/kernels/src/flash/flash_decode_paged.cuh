@@ -283,13 +283,21 @@ __global__ void flash_decode_paged(
             unsigned int other = warp_id + stride;
             #pragma unroll
             for (int g = 0; g < GQA_RATIO; g++) {
+                // Race fix (see flash_turboquant.cuh's reduction): reads
+                // hoisted before any write, __syncwarp() fence, lane-0 m/l
+                // stores — a slow lane re-reading smem after a fast lane's
+                // write merges `other`'s contribution twice.
                 float lw = smem_l[g][other];
+                float mw = smem_m[g][other];
+                float my_m = smem_m[g][warp_id], my_l = smem_l[g][warp_id];
+                __syncwarp();
                 if (lw > 0.f) {
-                    float mw = smem_m[g][other], my_m = smem_m[g][warp_id], my_l = smem_l[g][warp_id];
                     float m_new = fmaxf(my_m, mw);
                     float scale_me = expf(my_m - m_new), scale_w = expf(mw - m_new);
-                    smem_l[g][warp_id] = my_l * scale_me + lw * scale_w;
-                    smem_m[g][warp_id] = m_new;
+                    if (lane_id == 0) {
+                        smem_l[g][warp_id] = my_l * scale_me + lw * scale_w;
+                        smem_m[g][warp_id] = m_new;
+                    }
                     #pragma unroll
                     for (int i = 0; i < VEC_BF16; i++)
                         smem_o[g][warp_id][vec_offset + i] =
@@ -544,13 +552,21 @@ __global__ void flash_decode_paged_splitk(
             unsigned int other = warp_id + stride;
             #pragma unroll
             for (int g = 0; g < GQA_RATIO; g++) {
+                // Race fix (see flash_turboquant.cuh's reduction): reads
+                // hoisted before any write, __syncwarp() fence, lane-0 m/l
+                // stores — a slow lane re-reading smem after a fast lane's
+                // write merges `other`'s contribution twice.
                 float lw = smem_l[g][other];
+                float mw = smem_m[g][other];
+                float my_m = smem_m[g][warp_id], my_l = smem_l[g][warp_id];
+                __syncwarp();
                 if (lw > 0.f) {
-                    float mw = smem_m[g][other], my_m = smem_m[g][warp_id], my_l = smem_l[g][warp_id];
                     float m_new = fmaxf(my_m, mw);
                     float scale_me = expf(my_m - m_new), scale_w = expf(mw - m_new);
-                    smem_l[g][warp_id] = my_l * scale_me + lw * scale_w;
-                    smem_m[g][warp_id] = m_new;
+                    if (lane_id == 0) {
+                        smem_l[g][warp_id] = my_l * scale_me + lw * scale_w;
+                        smem_m[g][warp_id] = m_new;
+                    }
                     #pragma unroll
                     for (int i = 0; i < VEC_BF16; i++)
                         smem_o[g][warp_id][vec_offset + i] =
