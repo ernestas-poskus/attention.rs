@@ -323,7 +323,11 @@ pub fn flash_num_splits(max_context_len: usize) -> u32 {
 /// 160 blocks at 32 heads x 5 sequences on an 82-SM RTX 3090, and each block
 /// walks the whole context serially: 146 us per layer at ~2k tokens, 23% of
 /// decode GPU time in an nsys trace (MOSS-TTS, 5 slots). Splitting fills the
-/// GPU. The count does not depend on `max_context_len` so a CUDA graph
+/// GPU. For head_dim 128 with four q heads per kv head the split launcher
+/// runs the GQA-grouped kernel (flash_turboquant_gqa.cuh), which reads each kv
+/// head once per group: 67 us at 2300 tokens against 237 us single-pass on a
+/// 3090; `ATTN_TQ_GQA=0` keeps the per-q-head split kernel. The count does
+/// not depend on `max_context_len` so a CUDA graph
 /// captured at one length stays valid at every other; empty splits are
 /// skipped by the reduce. `ATTN_TQ_SPLITS=1` restores the single pass;
 /// values are clamped to `TQ_NUM_SPLITS`, the workspace capacity.
