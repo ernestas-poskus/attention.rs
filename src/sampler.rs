@@ -30,6 +30,8 @@ impl Sampler {
         }
     }
 
+    /// Samples one token per row of `logits` (`[B, vocab]`) and copies the
+    /// ids to the host, blocking until the GPU has produced them.
     #[cfg(feature = "cuda")]
     pub fn sample_cuda(
         &self,
@@ -39,6 +41,46 @@ impl Sampler {
         temperature: f32,
         seed: u64,
     ) -> Result<Vec<u32>> {
+        use candle_core::cuda_backend::WrapErr;
+        let (out_tokens, dev) = self.launch_cuda(logits, k, p, temperature, seed)?;
+        let mut host_out = vec![0u32; out_tokens.len()];
+        dev.dtoh_sync_copy_into(&out_tokens, &mut host_out).w()?;
+        Ok(host_out)
+    }
+
+    /// [`Self::sample_cuda`] without the readback: returns the sampled ids
+    /// as a `[B]` U32 tensor still on the device, so a caller sampling
+    /// several independent groups (one per sequence, each with its own seed
+    /// and counter) can launch them all and read every id back in one
+    /// transfer. Same kernels, seed and token position as `sample_cuda`, so
+    /// the ids are identical.
+    #[cfg(feature = "cuda")]
+    pub fn sample_cuda_async(
+        &self,
+        logits: &Tensor,
+        k: usize,
+        p: f32,
+        temperature: f32,
+        seed: u64,
+    ) -> Result<Tensor> {
+        let (out_tokens, dev) = self.launch_cuda(logits, k, p, temperature, seed)?;
+        let n = out_tokens.len();
+        let storage = candle_core::CudaStorage::wrap_cuda_slice(out_tokens, dev);
+        Tensor::from_storage(candle_core::Storage::Cuda(storage), n)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn launch_cuda(
+        &self,
+        logits: &Tensor,
+        k: usize,
+        p: f32,
+        temperature: f32,
+        seed: u64,
+    ) -> Result<(
+        candle_core::cuda_backend::cudarc::driver::CudaSlice<u32>,
+        candle_core::CudaDevice,
+    )> {
         let token_pos = self.next_token_pos();
         use candle_core::cuda_backend::cudarc::driver::DevicePtr;
         use candle_core::cuda_backend::CudaStorageSlice;
@@ -63,7 +105,9 @@ impl Sampler {
         };
 
         // 2. Alloc output buffer
-        let out_tokens = unsafe { dev.alloc::<i32>(b) }.w()?;
+        // The kernels write non-negative i32 ids; u32 storage holds the same bits
+        // and is a dtype candle tensors support.
+        let out_tokens = unsafe { dev.alloc::<u32>(b) }.w()?;
         let out_ptr = out_tokens.device_ptr();
         let stream = *dev.cu_stream() as i64;
         let out_ptr = *out_ptr as *mut core::ffi::c_void;
@@ -136,11 +180,7 @@ impl Sampler {
             ),
         }
 
-        // 4. Copy back to host
-        let mut host_out = vec![0i32; b];
-        dev.dtoh_sync_copy_into(&out_tokens, &mut host_out).w()?;
-
-        Ok(host_out.into_iter().map(|x| x as u32).collect())
+        Ok((out_tokens, dev.clone()))
     }
 
     #[cfg(feature = "metal")]
