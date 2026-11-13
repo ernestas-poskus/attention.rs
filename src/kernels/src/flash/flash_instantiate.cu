@@ -870,6 +870,16 @@ extern "C" void call_flash_tq_decode_k8v4(
     }
 }
 
+#include "flash_turboquant_gqa.cuh"
+#include <cstdlib>
+#include <cstring>
+
+// ATTN_TQ_GQA=0 keeps the per-q-head split kernel.
+static bool tq_gqa_enabled() {
+    static const bool on = [] { const char* v = std::getenv("ATTN_TQ_GQA"); return !(v && std::strcmp(v, "0") == 0); }();
+    return on;
+}
+
 extern "C" void call_flash_tq_decode_k8v4_splitk(
     const void* Q, const void* K_cache,
     const void* V_absmax, const void* V_quant, void* workspace,
@@ -883,6 +893,17 @@ extern "C" void call_flash_tq_decode_k8v4_splitk(
     int dtype, int64_t stream
 ) {
     cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+#define TRY_TQ_GQA(HALF) \
+    launch_flash_tq_decode_k8v4_gqa_splitk<HALF>(Q, K_cache, V_absmax, V_quant, workspace, \
+        block_tables, seq_lens, max_blocks_per_seq, num_q_heads, num_kv_heads, head_dim, block_size, \
+        inv_sqrt_d, num_splits, num_seqs, q_stride, softcap, k_scale_ptr, sliding_window, s)
+    if (tq_gqa_enabled()) {
+        if (dtype == 0 && TRY_TQ_GQA(__half)) return;
+#ifndef NO_BF16_KERNEL
+        if (dtype == 1 && TRY_TQ_GQA(__nv_bfloat16)) return;
+#endif
+    }
+#undef TRY_TQ_GQA
     if (dtype == 0) {
 #define HALF __half
         unsigned int threads = 8 * 32;

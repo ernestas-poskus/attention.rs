@@ -106,6 +106,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=src/flash/flash_decode_paged_fp8.cuh");
     println!("cargo:rerun-if-changed=src/flash/flash_reshape_cache.cuh");
     println!("cargo:rerun-if-changed=src/flash/flash_turboquant.cuh");
+    println!("cargo:rerun-if-changed=src/flash/flash_turboquant_gqa.cuh");
     println!("cargo:rerun-if-changed=src/flash/flash_turboquant_lowbit.cuh");
     println!("cargo:rerun-if-changed=src/flash/flash_prefill_tq4.cuh");
     println!("cargo:rerun-if-changed=src/flash/flash_prefill_tq3.cuh");
