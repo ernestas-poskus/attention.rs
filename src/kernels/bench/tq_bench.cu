@@ -211,7 +211,7 @@ int main() {
         if (!(md == md)) md = INFINITY;
         return md / fmaxf(mx, 1e-6f);
     };
-    auto cpu_err = [&](void* dev, const std::vector<int>& sl) {
+    auto cpu_err = [&](void* dev, const std::vector<int>& sl, bool diag = false) {
         std::vector<uint16_t> x(hq.size());
         CK(cudaMemcpy(x.data(), dev, x.size() * 2, cudaMemcpyDeviceToHost));
         float md = 0, mx = 0;
@@ -232,10 +232,14 @@ int main() {
                     o[i] += e * (((i & 1) ? (by >> 4) : (by & 0xF)) - 7.5) * va;
                 }
             }
+            float hd_err = 0, hd_mx = 0;
             for (unsigned i = 0; i < HD; i++) {
                 float r = (float)(o[i] / L), g = bf2f(x[(s * NQ + h) * HD + i]);
                 md = fmaxf(md, fabsf(r - g)); mx = fmaxf(mx, fabsf(r));
+                hd_err = fmaxf(hd_err, fabsf(r - g)); hd_mx = fmaxf(hd_mx, fabsf(r));
+                if (diag && s == 0 && h == 0 && (i < 6 || i == 64 || i == 127)) printf("    s0h0 d%-3u cpu %+.4f gpu %+.4f\n", i, r, g);
             }
+            if (diag && h % 8 == 0) printf("    seq %u (len %d) head %2u relerr %.2e\n", s, sl[s], h, hd_err / hd_mx);
         }
         return md / mx;
     };
@@ -257,7 +261,7 @@ int main() {
         for (int v : sl) bytes += (double)v * NKV * (HD + HD / 2 + 4);
         base(0, do1); CK(cudaDeviceSynchronize());
         float tb = timeit([&](int L) { base(L, do1); });
-        printf("ctx %4u  base          %7.1f us  %6.0f GB/s(unique KV)  cpu_relerr %.2e\n", ctx, tb, bytes / tb / 1e3, cpu_err(do1, sl));
+        printf("ctx %4u  base          %7.1f us  %6.0f GB/s(unique KV)  cpu_relerr %.2e\n", ctx, tb, bytes / tb / 1e3, cpu_err(do1, sl, ctx == 400u));
         for (unsigned S : {4u, 8u, 16u}) {
             split(0, do2, S); CK(cudaDeviceSynchronize());
             float d = cpu_err(do2, sl);
