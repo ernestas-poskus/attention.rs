@@ -42,8 +42,8 @@ impl Sampler {
         seed: u64,
     ) -> Result<Vec<u32>> {
         use candle_core::cuda_backend::WrapErr;
-        let (out_tokens, dev) = self.launch_cuda(logits, k, p, temperature, seed)?;
-        let mut host_out = vec![0u32; out_tokens.len()];
+        let (out_tokens, dev, b) = self.launch_cuda(logits, k, p, temperature, seed)?;
+        let mut host_out = vec![0u32; b];
         dev.dtoh_sync_copy_into(&out_tokens, &mut host_out).w()?;
         Ok(host_out)
     }
@@ -63,10 +63,9 @@ impl Sampler {
         temperature: f32,
         seed: u64,
     ) -> Result<Tensor> {
-        let (out_tokens, dev) = self.launch_cuda(logits, k, p, temperature, seed)?;
-        let n = out_tokens.len();
+        let (out_tokens, dev, b) = self.launch_cuda(logits, k, p, temperature, seed)?;
         let storage = candle_core::CudaStorage::wrap_cuda_slice(out_tokens, dev);
-        Tensor::from_storage(candle_core::Storage::Cuda(storage), n)
+        Tensor::from_storage(candle_core::Storage::Cuda(storage), b)
     }
 
     #[cfg(feature = "cuda")]
@@ -80,6 +79,7 @@ impl Sampler {
     ) -> Result<(
         candle_core::cuda_backend::cudarc::driver::CudaSlice<u32>,
         candle_core::CudaDevice,
+        usize,
     )> {
         let token_pos = self.next_token_pos();
         use candle_core::cuda_backend::cudarc::driver::DevicePtr;
@@ -180,7 +180,7 @@ impl Sampler {
             ),
         }
 
-        Ok((out_tokens, dev.clone()))
+        Ok((out_tokens, dev.clone(), b))
     }
 
     #[cfg(feature = "metal")]
