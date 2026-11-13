@@ -318,6 +318,26 @@ pub fn flash_num_splits(max_context_len: usize) -> u32 {
     (needed as u32).clamp(2, NUM_SPLITS)
 }
 
+/// Split count for the TurboQuant k8v4 decode, fixed regardless of context
+/// length. The single-pass kernel launches one block per (head, sequence),
+/// 160 blocks at 32 heads x 5 sequences on an 82-SM RTX 3090, and each block
+/// walks the whole context serially: 146 us per layer at ~2k tokens, 23% of
+/// decode GPU time in an nsys trace (MOSS-TTS, 5 slots). Splitting fills the
+/// GPU. The count does not depend on `max_context_len` so a CUDA graph
+/// captured at one length stays valid at every other; empty splits are
+/// skipped by the reduce. `ATTN_TQ_SPLITS=1` restores the single pass;
+/// values are clamped to `TQ_NUM_SPLITS`, the workspace capacity.
+pub fn tq_k8v4_num_splits() -> u32 {
+    static SPLITS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *SPLITS.get_or_init(|| {
+        std::env::var("ATTN_TQ_SPLITS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(8)
+            .clamp(1, TQ_NUM_SPLITS)
+    })
+}
+
 #[cfg(feature = "cuda")]
 pub fn flash_decode(
     query: &Tensor,
@@ -687,8 +707,9 @@ pub fn flash_tq_decode_k8v4_splitk(
     workspace: Option<&Tensor>,
     sliding_window: Option<usize>,
 ) -> Result<Tensor> {
-    let num_splits = flash_num_splits(max_context_len);
-    let use_splitk = num_splits > 1 && max_context_len >= SPLIT_K_THRESHOLD && workspace.is_some();
+    let _ = max_context_len;
+    let num_splits = tq_k8v4_num_splits();
+    let use_splitk = num_splits > 1 && workspace.is_some();
 
     if !use_splitk {
         return flash_tq_decode_k8v4(
