@@ -147,6 +147,11 @@ __global__ void __launch_bounds__(NW * 32) tq_k8v4_gqa_splitk(
 }
 
 static float bf2f(uint16_t b) { uint32_t u = (uint32_t)b << 16; float f; memcpy(&f, &u, 4); return f; }
+static float e4m3(unsigned char b) {
+    const int s = b >> 7, e = (b >> 3) & 0xF, m = b & 7;
+    const float v = e == 0 ? ldexpf((float)m / 8.f, -6) : ldexpf(1.f + (float)m / 8.f, e - 7);
+    return s ? -v : v;
+}
 
 int main() {
     const unsigned NQ = 32, NKV = 8, HD = 128, BS = 32, NCTX = 2304, NSEQ = 5, LAYERS = 36;
@@ -206,6 +211,34 @@ int main() {
         if (!(md == md)) md = INFINITY;
         return md / fmaxf(mx, 1e-6f);
     };
+    auto cpu_err = [&](void* dev, const std::vector<int>& sl) {
+        std::vector<uint16_t> x(hq.size());
+        CK(cudaMemcpy(x.data(), dev, x.size() * 2, cudaMemcpyDeviceToHost));
+        float md = 0, mx = 0;
+        for (unsigned s = 0; s < NSEQ; s++) for (unsigned h = 0; h < NQ; h++) {
+            const unsigned kvh = h / (NQ / NKV);
+            std::vector<double> sc(sl[s]); double M = -1e300;
+            for (int p = 0; p < sl[s]; p++) {
+                size_t slot = (size_t)bt[s * BPS + p / BS] * BS + p % BS; double d = 0;
+                for (unsigned i = 0; i < HD; i++) d += bf2f(hq[(s * NQ + h) * HD + i]) * e4m3(hk[(slot * NKV + kvh) * HD + i]);
+                sc[p] = d * isd; M = std::max(M, sc[p]);
+            }
+            std::vector<double> o(HD, 0.0); double L = 0;
+            for (int p = 0; p < sl[s]; p++) {
+                size_t slot = (size_t)bt[s * BPS + p / BS] * BS + p % BS; double e = exp(sc[p] - M); L += e;
+                const double va = ha[slot * NKV + kvh] * 0.13333333;
+                for (unsigned i = 0; i < HD; i++) {
+                    unsigned char by = hv[(slot * NKV + kvh) * (HD / 2) + i / 2];
+                    o[i] += e * (((i & 1) ? (by >> 4) : (by & 0xF)) - 7.5) * va;
+                }
+            }
+            for (unsigned i = 0; i < HD; i++) {
+                float r = (float)(o[i] / L), g = bf2f(x[(s * NQ + h) * HD + i]);
+                md = fmaxf(md, fabsf(r - g)); mx = fmaxf(mx, fabsf(r));
+            }
+        }
+        return md / mx;
+    };
     auto timeit = [&](auto&& f) {
         for (int i = 0; i < 36; i++) f(i % LAYERS);
         CK(cudaDeviceSynchronize());
@@ -216,7 +249,7 @@ int main() {
         return ms * 1000.f / ITERS;
     };
 
-    for (unsigned ctx : {400u, 900u, 1400u, 2000u, 2300u}) {
+    for (unsigned ctx : {400u, 1400u, 2300u}) {
         std::vector<int> sl(NSEQ);
         for (unsigned s = 0; s < NSEQ; s++) sl[s] = std::max(1, (int)ctx - (int)(s * ctx / 10));
         CK(cudaMemcpy(dsl, sl.data(), NSEQ * 4, cudaMemcpyHostToDevice));
@@ -224,17 +257,17 @@ int main() {
         for (int v : sl) bytes += (double)v * NKV * (HD + HD / 2 + 4);
         base(0, do1); CK(cudaDeviceSynchronize());
         float tb = timeit([&](int L) { base(L, do1); });
-        printf("ctx %4u  base          %7.1f us  %6.0f GB/s(unique KV)\n", ctx, tb, bytes / tb / 1e3);
+        printf("ctx %4u  base          %7.1f us  %6.0f GB/s(unique KV)  cpu_relerr %.2e\n", ctx, tb, bytes / tb / 1e3, cpu_err(do1, sl));
         for (unsigned S : {4u, 8u, 16u}) {
             split(0, do2, S); CK(cudaDeviceSynchronize());
-            float d = maxdiff(do1, do2);
+            float d = cpu_err(do2, sl);
             float t = timeit([&](int L) { split(L, do2, S); });
             printf("ctx %4u  splitk S=%-2u   %7.1f us  %6.0f GB/s  relerr %.2e\n", ctx, S, t, bytes / t / 1e3, d);
         }
         for (int nw : {4, 8})
-            for (unsigned S : {4u, 8u, 16u, 32u}) {
+            for (unsigned S : {4u, 8u, 12u}) {
                 gqa(0, do2, S, nw); CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
-                float d = maxdiff(do1, do2);
+                float d = cpu_err(do2, sl);
                 float t = timeit([&](int L) { gqa(L, do2, S, nw); });
                 printf("ctx %4u  gqa nw=%d S=%-2u %7.1f us  %6.0f GB/s  relerr %.2e\n", ctx, nw, S, t, bytes / t / 1e3, d);
             }
