@@ -74,6 +74,12 @@ const ggml_cuda_device_info & ggml_cuda_info() {
     return info;
 }
 
+// Programmatic dependent launch off: candle's neighbouring kernels do not
+// signal launch completion, so there is nothing to overlap with.
+bool ggml_cuda_kernel_can_use_pdl(const void *) {
+    return false;
+}
+
 bool ggml_cuda_pool_debug_enabled() {
     return false;
 }
