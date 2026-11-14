@@ -42,6 +42,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=src/moe_gemm_wmma.cu");
     println!("cargo:rerun-if-changed=src/moe_gemm_gguf.cu");
     println!("cargo:rerun-if-changed=src/gguf_gemm.cu");
+    println!("cargo:rerun-if-changed=src/llamacpp");
     println!("cargo:rerun-if-changed=src/gguf_gemm_multi.cu");
     println!("cargo:rerun-if-changed=src/moe_gguf_small_m.cu");
     println!("cargo:rerun-if-changed=src/moe_wmma_gguf.cu");
@@ -123,9 +124,10 @@ fn main() -> Result<()> {
         .nvcc_thread_patterns(&["flash_api", "flash_decode", "cutlass", "flashinfer"], 2)
         .arg("--expt-relaxed-constexpr")
         .arg("-O3")
-        // Vendored llama.cpp MMQ: benched on its own (bench/mmq_bench.cu)
-        // until it is wired into the crate with its include paths.
-        .exclude(&["llamacpp/*"]);
+        // Vendored llama.cpp MMQ (src/llamacpp/moss_mmq.cu): ggml headers.
+        .arg("-Isrc/llamacpp/ggml/include")
+        .arg("-Isrc/llamacpp/ggml/src")
+        .arg("-extended-lambda");
 
     // MSVC host defaults to C++14 and its traditional preprocessor; kernels need
     // C++20 (lambda template params) and CCCL (CUDA 13) rejects the old preprocessor.

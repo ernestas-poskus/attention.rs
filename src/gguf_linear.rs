@@ -217,3 +217,118 @@ impl candle_core::CustomOp1 for GgufIqMatMul {
         self.launch(x, x_l)
     }
 }
+
+/// Error text marking a declined [`llamacpp_mmq_matmul`] launch, so the
+/// caller can fall back instead of failing the forward pass.
+#[cfg(feature = "cuda")]
+const MMQ_DECLINED: &str = "llama.cpp mmq declined";
+
+/// Large-M Q4_K/Q6_K matmul through llama.cpp's MMQ (int8 tensor-core mma on
+/// Ampere and newer): `input [..., K]` × weight `[N, K]` → `[..., N]` in the
+/// input's dtype. The activation is quantized to Q8_1 like the decode
+/// kernels; the output is F32 internally, so it cannot overflow the way an F16
+/// GEMM can. Returns `Ok(None)` for weights, inputs or states it does not
+/// handle (other dtypes, non-CUDA, a stream being captured), leaving the
+/// caller's path to run. Shaped for `candle_core::quantized::set_large_m_matmul`.
+pub fn llamacpp_mmq_matmul(input: &Tensor, weight: &QTensor) -> Result<Option<Tensor>> {
+    #[cfg(feature = "cuda")]
+    {
+        let type_x = match weight.dtype() {
+            GgmlDType::Q4K => 12,
+            GgmlDType::Q6K => 14,
+            _ => return Ok(None),
+        };
+        if !input.device().is_cuda() {
+            return Ok(None);
+        }
+        let (size_n, size_k) = weight.shape().dims2()?;
+        let in_dtype = input.dtype();
+        let x = input.to_dtype(DType::F32)?.contiguous()?;
+        let op = LlamaCppMmq {
+            weight_ptr: weight.device_ptr()? as u64,
+            size_n,
+            size_k,
+            type_x,
+        };
+        match x.apply_op1_no_bwd(&op) {
+            Ok(out) => Ok(Some(out.to_dtype(in_dtype)?)),
+            Err(err) if err.to_string().contains(MMQ_DECLINED) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (input, weight);
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "cuda")]
+struct LlamaCppMmq {
+    weight_ptr: u64,
+    size_n: usize,
+    size_k: usize,
+    type_x: i32,
+}
+
+#[cfg(feature = "cuda")]
+impl candle_core::CustomOp1 for LlamaCppMmq {
+    fn name(&self) -> &'static str {
+        "llamacpp_mmq"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &candle_core::CpuStorage,
+        _: &candle_core::Layout,
+    ) -> Result<(candle_core::CpuStorage, candle_core::Shape)> {
+        candle_core::bail!("llamacpp_mmq is only implemented on CUDA")
+    }
+
+    fn cuda_fwd(
+        &self,
+        x: &candle_core::CudaStorage,
+        x_l: &candle_core::Layout,
+    ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::CudaStorage;
+
+        let x_dims = x_l.shape().dims();
+        let Some(&size_k) = x_dims.last() else {
+            candle_core::bail!("llamacpp_mmq requires a rank-2-or-higher input");
+        };
+        if size_k != self.size_k || !x_l.is_contiguous() {
+            candle_core::bail!(
+                "llamacpp_mmq wants contiguous [.., {}] input, got {x_l:?}",
+                self.size_k
+            );
+        }
+        let size_m = x_l.shape().elem_count() / size_k;
+        let mut output_dims = x_dims.to_vec();
+        *output_dims.last_mut().unwrap() = self.size_n;
+        let output_shape = candle_core::Shape::from(output_dims);
+
+        let input = x.as_cuda_slice::<f32>()?;
+        let input = input.slice(x_l.start_offset()..x_l.start_offset() + x_l.shape().elem_count());
+        let dev = x.device().clone();
+        let output = unsafe { dev.alloc::<f32>(output_shape.elem_count()) }.w()?;
+        let rc = unsafe {
+            crate::kernels::ffi::moss_llamacpp_mmq(
+                self.weight_ptr as *const std::ffi::c_void,
+                self.type_x,
+                *input.device_ptr() as *const f32,
+                *output.device_ptr() as *mut f32,
+                self.size_n as i64,
+                size_k as i64,
+                size_m as i64,
+                *dev.cu_stream() as *mut std::ffi::c_void,
+            )
+        };
+        if rc != 0 {
+            candle_core::bail!("{MMQ_DECLINED} (code {rc})");
+        }
+        Ok((CudaStorage::wrap_cuda_slice(output, dev), output_shape))
+    }
+}

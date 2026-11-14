@@ -547,6 +547,20 @@ extern "C" {
         stream: i64,
     );
 
+    // llama.cpp's MMQ (vendored, src/llamacpp) for dense Q4_K/Q6_K matmuls:
+    // dst[m][n] = y[m][k] . x[n][k]^T. Returns 0 on success; nonzero means
+    // it declined (type not built, stream capturing, no tile fits).
+    pub fn moss_llamacpp_mmq(
+        x: *const c_void,
+        type_x: i32,
+        y: *const f32,
+        dst: *mut f32,
+        nrows_x: i64,
+        ncols_x: i64,
+        ncols_y: i64,
+        stream: *mut c_void,
+    ) -> i32;
+
     // Dense GEMM for ordinary GGUF tensors. The weights remain in their
     // original Q/K/IQ block format; only the activation is quantized to Q8_1.
     pub fn gguf_gemm(
