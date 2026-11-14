@@ -109,6 +109,11 @@ std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_for_device(g
     return std::unique_ptr<ggml_cuda_pool>(new moss_mmq_pool());
 }
 
+// Forward-declared in common.cuh and defined in ggml-cuda.cu, which is not
+// built here. The context's graph and stream members stay empty.
+struct ggml_cuda_graph {};
+struct ggml_cuda_stream_context {};
+
 ggml_backend_cuda_context::ggml_backend_cuda_context(int device) : device(device), name(GGML_CUDA_NAME + std::to_string(device)) {}
 
 ggml_backend_cuda_context::~ggml_backend_cuda_context() {}
