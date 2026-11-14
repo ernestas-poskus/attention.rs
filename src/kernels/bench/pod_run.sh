@@ -1,6 +1,11 @@
-# Run on a CUDA pod from the repository root: the TurboQuant decode bench.
+# Run on a CUDA pod from the repository root: the llama.cpp MMQ prefill bench.
 set -u
 nvidia-smi --query-gpu=name,power.limit --format=csv,noheader
 cd src/kernels/bench
-nvcc -O3 -arch=sm_86 -std=c++17 --expt-relaxed-constexpr -I../src -I../src/flash tq_bench.cu ../src/flash/flash_instantiate.cu ../src/flash/flash_decode.cu -o /root/tqb 2>&1 | grep -E "error|warning.*tq_bench" | head -30
-/root/tqb 2>&1; echo "=== ATTN_TQ_GQA=0"; ATTN_TQ_GQA=0 /root/tqb 2>&1 | grep splitk
+L=../src/llamacpp
+nvcc -O3 -arch=sm_86 -std=c++17 -use_fast_math -extended-lambda --expt-relaxed-constexpr \
+  -I$L -I$L/ggml/include -I$L/ggml/src -I$L/ggml/src/ggml-cuda \
+  mmq_bench.cu $L/moss_mmq.cu $L/ggml/src/ggml-cuda/quantize.cu \
+  $L/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_k.cu $L/ggml/src/ggml-cuda/template-instances/mmq-instance-q6_k.cu \
+  -lcublas -o /root/mmqb 2>&1 | grep -E "error|undefined" | head -40
+/root/mmqb 2>&1

@@ -122,7 +122,10 @@ fn main() -> Result<()> {
         .source_dir("src")
         .nvcc_thread_patterns(&["flash_api", "flash_decode", "cutlass", "flashinfer"], 2)
         .arg("--expt-relaxed-constexpr")
-        .arg("-O3");
+        .arg("-O3")
+        // Vendored llama.cpp MMQ: benched on its own (bench/mmq_bench.cu)
+        // until it is wired into the crate with its include paths.
+        .exclude(&["llamacpp/*"]);
 
     // MSVC host defaults to C++14 and its traditional preprocessor; kernels need
     // C++20 (lambda template params) and CCCL (CUDA 13) rejects the old preprocessor.
