@@ -93,7 +93,7 @@ int main() {
             CK(cudaMalloc(&dw, w.size())); CK(cudaMalloc(&dwf, wf.size() * 4));
             CK(cudaMemcpy(dw, w.data(), w.size(), cudaMemcpyHostToDevice));
             CK(cudaMemcpy(dwf, wf.data(), wf.size() * 4, cudaMemcpyHostToDevice));
-            for (int m : {64, 405, 1024}) {
+            for (int m : {5, 8, 64, 405}) {
                 std::vector<float> y((size_t) m * k);
                 // Activations with a few large channels, as real prompts have.
                 for (auto & v : y) v = ((int) (rng() % 2001) - 1000) / 500.f;
