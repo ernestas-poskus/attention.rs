@@ -326,7 +326,7 @@ pub fn flash_num_splits(max_context_len: usize) -> u32 {
 /// GPU. For head_dim 128 with four q heads per kv head the split launcher
 /// runs the GQA-grouped kernel (flash_turboquant_gqa.cuh), which reads each kv
 /// head once per group: 67 us at 2300 tokens against 237 us single-pass on a
-/// 3090; `ATTN_TQ_GQA=0` keeps the per-q-head split kernel. The count does
+/// 3090. The count does
 /// not depend on `max_context_len` so a CUDA graph
 /// captured at one length stays valid at every other; empty splits are
 /// skipped by the reduce. Must not exceed `TQ_NUM_SPLITS`, the workspace
