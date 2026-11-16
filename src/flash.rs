@@ -329,17 +329,13 @@ pub fn flash_num_splits(max_context_len: usize) -> u32 {
 /// 3090; `ATTN_TQ_GQA=0` keeps the per-q-head split kernel. The count does
 /// not depend on `max_context_len` so a CUDA graph
 /// captured at one length stays valid at every other; empty splits are
-/// skipped by the reduce. `ATTN_TQ_SPLITS=1` restores the single pass;
-/// values are clamped to `TQ_NUM_SPLITS`, the workspace capacity.
+/// skipped by the reduce. Must not exceed `TQ_NUM_SPLITS`, the workspace
+/// capacity. (The `ATTN_TQ_SPLITS` override was removed: 8 is the measured
+/// setting and there is no reason to run the single pass.)
 pub fn tq_k8v4_num_splits() -> u32 {
-    static SPLITS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *SPLITS.get_or_init(|| {
-        std::env::var("ATTN_TQ_SPLITS")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(8)
-            .clamp(1, TQ_NUM_SPLITS)
-    })
+    const SPLITS: u32 = 8;
+    const _: () = assert!(SPLITS <= TQ_NUM_SPLITS);
+    SPLITS
 }
 
 #[cfg(feature = "cuda")]
@@ -903,11 +899,7 @@ pub fn flash_tq4_decode(
     let num_seqs = query.dim(0)?;
     let block_size_from_absmax = {
         let dims = k_absmax.dims();
-        if dims.len() >= 2 {
-            dims[1]
-        } else {
-            16
-        }
+        if dims.len() >= 2 { dims[1] } else { 16 }
     };
     let q_stride = (num_q_heads * head_dim) as u32;
 
@@ -1099,11 +1091,7 @@ pub fn flash_tq3_decode(
     let num_seqs = query.dim(0)?;
     let block_size_from_absmax = {
         let dims = k_absmax.dims();
-        if dims.len() >= 2 {
-            dims[1]
-        } else {
-            16
-        }
+        if dims.len() >= 2 { dims[1] } else { 16 }
     };
     let q_stride = (num_q_heads * head_dim) as u32;
 
