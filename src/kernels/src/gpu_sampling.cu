@@ -145,13 +145,16 @@ __global__ void stageA_local_topk(
   BlockSort(temp).SortDescending(v, i);
   __syncthreads();
 
-  // Write out the first K ranks from the sorted block.
-  // Rank = threadIdx.x + it*BLOCK_THREADS
+  // Write out the first K ranks from the sorted block. SortDescending
+  // leaves a blocked arrangement: thread t holds ranks
+  // t*ITEMS_PER_THREAD .. t*ITEMS_PER_THREAD+ITEMS_PER_THREAD-1. Reading it
+  // as striped (threadIdx.x + it*BLOCK_THREADS) kept only every
+  // ITEMS_PER_THREAD-th rank, so the runner-up tokens were never sampled.
   int out_base = (b * tiles_per_row + tile) * K;
 
   #pragma unroll
   for (int it = 0; it < ITEMS_PER_THREAD; ++it) {
-    int rank = threadIdx.x + it * BLOCK_THREADS;
+    int rank = threadIdx.x * ITEMS_PER_THREAD + it;
     if (rank < K) {
       out_vals[out_base + rank] = v[it];
       out_idx[out_base + rank]  = i[it];
